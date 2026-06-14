@@ -57,11 +57,21 @@ _DANGLING_ANSI_STYLE_SUFFIX_RE = re.compile(r"(?:\[[0-9;]*m\])+$")
 
 
 def sanitize_anthropic_model_id(model: str) -> str:
-    """Return an Anthropic model id without terminal styling artifacts."""
+    """Return an Anthropic model id without terminal styling artifacts.
+
+    The ``[1m]`` 1M-context tier suffix Claude Code appends to a model id (e.g.
+    ``claude-opus-4-8[1m]``) is byte-identical to a dangling ANSI bold artifact
+    (``ESC[1m`` reduced to ``[1m]``), so the dangling-suffix scrub below would
+    strip it and silently downgrade the request to the model's 200K-context
+    form. Preserve a genuine trailing ``[1m]`` tier marker, then scrub residue.
+    """
     cleaned = _ANSI_ESCAPE_RE.sub("", str(model)).strip()
+    tier = ""
     if cleaned.startswith("claude-"):
+        if cleaned.endswith("[1m]"):
+            tier, cleaned = "[1m]", cleaned[:-4]
         cleaned = _DANGLING_ANSI_STYLE_SUFFIX_RE.sub("", cleaned)
-    return cleaned
+    return cleaned + tier
 
 
 def sanitize_anthropic_model_metadata(value: Any) -> Any:
