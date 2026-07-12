@@ -83,7 +83,9 @@ ANTHROPIC_PRICES: dict[str, ModelPricing] = {
     "claude-sonnet-4-20250514": _p("claude-sonnet-4-20250514", 3.00, 15.00, 0.30, _STD, "Sonnet 4"),
     # Haiku 4.5 ($1 / $5, 200K context)
     "claude-haiku-4-5": _p("claude-haiku-4-5", 1.00, 5.00, 0.10, _STD, "Haiku 4.5"),
-    "claude-haiku-4-5-20251001": _p("claude-haiku-4-5-20251001", 1.00, 5.00, 0.10, _STD, "Haiku 4.5"),
+    "claude-haiku-4-5-20251001": _p(
+        "claude-haiku-4-5-20251001", 1.00, 5.00, 0.10, _STD, "Haiku 4.5"
+    ),
     "claude-3-5-sonnet-20241022": ModelPricing(
         model="claude-3-5-sonnet-20241022",
         provider="anthropic",
