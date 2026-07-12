@@ -67,10 +67,9 @@ def sanitize_anthropic_model_id(model: str) -> str:
     """
     cleaned = _ANSI_ESCAPE_RE.sub("", str(model)).strip()
     tier = ""
-    if cleaned.startswith("claude-"):
-        if cleaned.endswith("[1m]"):
-            tier, cleaned = "[1m]", cleaned[:-4]
-        cleaned = _DANGLING_ANSI_STYLE_SUFFIX_RE.sub("", cleaned)
+    if cleaned.startswith("claude-") and cleaned.endswith("[1m]"):
+        tier, cleaned = "[1m]", cleaned[:-4]
+    cleaned = _DANGLING_ANSI_STYLE_SUFFIX_RE.sub("", cleaned)
     return cleaned + tier
 
 
@@ -109,7 +108,8 @@ ANTHROPIC_CONTEXT_LIMITS: dict[str, int] = {
     "claude-opus-4-1-20250805": 200000,
     "claude-opus-4-0": 200000,
     "claude-opus-4-20250514": 200000,
-    # Sonnet 4.6 — 1M context
+    # Sonnet 5 / 4.6 — 1M context
+    "claude-sonnet-5": 1000000,
     "claude-sonnet-4-6": 1000000,
     # Sonnet 4.5 / 4 — 200K context (native; 1M was a separate beta tier)
     "claude-sonnet-4-5": 200000,
@@ -136,7 +136,7 @@ ANTHROPIC_CONTEXT_LIMITS: dict[str, int] = {
 }
 
 # Fallback pricing (USD per 1M tokens) — LiteLLM is the preferred source.
-# Verified against platform.claude.com/docs/en/about-claude/pricing on 2026-06-14.
+# Verified against platform.claude.com/docs/en/about-claude/pricing on 2026-07-04.
 # cached_input = cache READ (0.1x base input). 5m cache WRITE is 1.25x base input.
 ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
     # Frontier (Fable / Mythos tier — $10 / $50)
@@ -154,7 +154,8 @@ ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4-1-20250805": {"input": 15.00, "output": 75.00, "cached_input": 1.50},
     "claude-opus-4-0": {"input": 15.00, "output": 75.00, "cached_input": 1.50},
     "claude-opus-4-20250514": {"input": 15.00, "output": 75.00, "cached_input": 1.50},
-    # Sonnet 4.6 / 4.5 / 4 ($3 / $15)
+    # Sonnet 5 / 4.6 / 4.5 / 4 ($3 / $15)
+    "claude-sonnet-5": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
@@ -180,8 +181,8 @@ ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
 _PATTERN_DEFAULTS = {
     # Current-generation profiles for UNRECOGNIZED future model ids only — every
     # known model is listed explicitly above, so these never apply to them.
-    # Opus and Sonnet ship 1M context today; Haiku is 200K.
-    "opus": {"context": 1000000, "pricing": {"input": 5.00, "output": 25.00, "cached_input": 0.50}},
+    # Keep unknown Opus conservative; explicit entries above cover known 1M tiers.
+    "opus": {"context": 200000, "pricing": {"input": 5.00, "output": 25.00, "cached_input": 0.50}},
     "sonnet": {
         "context": 1000000,
         "pricing": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
@@ -194,6 +195,36 @@ _UNKNOWN_CLAUDE_DEFAULT = {
     "context": 200000,  # Safe assumption for Claude 3+
     "pricing": {"input": 3.00, "output": 15.00, "cached_input": 0.30},  # Sonnet-tier pricing
 }
+
+
+# DeepSeek fallback pricing for --anthropic-api-url deepseek routing
+_DEEPSEEK_FALLBACK_PRICING: dict[str, dict[str, float]] = {
+    "deepseek-v4-flash": {"input": 0.14, "output": 0.28, "cached_input": 0.0028},
+    "deepseek-v4-pro": {"input": 0.435, "output": 0.87, "cached_input": 0.003625},
+}
+
+
+def _get_deepseek_pricing(model: str) -> dict[str, float] | None:
+    """Get fallback pricing for a DeepSeek model.
+
+    Used when the Anthropic provider encounters a deepseek-* model name
+    (via --anthropic-api-url pointing at DeepSeek's Anthropic-compatible
+    endpoint) and LiteLLM is unavailable.
+
+    Args:
+        model: The model name to look up.
+
+    Returns:
+        Pricing dict with input/output/cached_input keys, or None.
+    """
+    # Direct match
+    if model in _DEEPSEEK_FALLBACK_PRICING:
+        return cast(dict[str, float], _DEEPSEEK_FALLBACK_PRICING[model])
+    # Partial match
+    for known_model, prices in _DEEPSEEK_FALLBACK_PRICING.items():
+        if model in known_model or known_model in model:
+            return cast(dict[str, float], prices)
+    return None
 
 
 def _load_custom_model_config() -> dict[str, Any]:
@@ -214,7 +245,7 @@ def _load_custom_model_config() -> dict[str, Any]:
         try:
             # Check if it's a file path
             if os.path.isfile(env_config):
-                with open(env_config) as f:
+                with open(env_config, encoding="utf-8") as f:
                     loaded = json.load(f)
             else:
                 # Try to parse as JSON string
@@ -240,7 +271,7 @@ def _load_custom_model_config() -> dict[str, Any]:
             config_file = legacy_models
     if config_file.exists():
         try:
-            with open(config_file) as f:
+            with open(config_file, encoding="utf-8") as f:
                 loaded = json.load(f)
 
             # Only load anthropic-specific config
@@ -319,11 +350,18 @@ class AnthropicTokenCounter(TokenCounter):
             )
             _FALLBACK_WARNING_SHOWN = True
 
-        # Load tiktoken as fallback
+        # Load tiktoken as fallback — bounded, so a stalled vocab download can't
+        # hang token counting inside a request (tiktoken's downloader has no
+        # network timeout); on timeout we estimate by characters instead (GH #956).
         try:
-            import tiktoken
+            from headroom.tokenizers.tiktoken_counter import (
+                TiktokenLoadError,
+                load_encoding,
+            )
 
-            self._encoding = tiktoken.get_encoding("cl100k_base")
+            self._encoding = load_encoding("cl100k_base")
+        except TiktokenLoadError:
+            self._encoding = None  # count_text() falls back to a character estimate
         except ImportError:
             if not self._use_api:
                 warnings.warn(
@@ -734,5 +772,9 @@ class AnthropicProvider(Provider):
         # Default for unknown Claude models
         if model.startswith("claude"):
             return cast(dict[str, float], _UNKNOWN_CLAUDE_DEFAULT["pricing"])
+
+        # DeepSeek model fallback (via --anthropic-api-url)
+        if model.startswith("deepseek"):
+            return _get_deepseek_pricing(model)
 
         return None
